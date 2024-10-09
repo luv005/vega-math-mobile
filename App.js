@@ -1,17 +1,27 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   View,
-  TextInput,
-  TouchableOpacity,
   Text,
-  Image,
   Alert,
-  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+import { GiftedChat, Actions, InputToolbar, Bubble } from 'react-native-gifted-chat';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import 'katex/dist/katex.min.css';
 import Latex from 'react-latex-next';
+
+// Import KaTeX for web
+let katex;
+if (Platform.OS === 'web') {
+  katex = require('katex');
+}
+
+// Only import MathJax for native platforms
+const MathJax = Platform.OS !== 'web' ? require('react-native-mathjax').default : null;
 
 // Add this function at the top of your file, outside of the App component
 function logFormData(formData) {
@@ -34,139 +44,244 @@ export default function App() {
   const [inputText, setInputText] = useState('');
   const [image, setImage] = useState(null);
   const [result, setResult] = useState('');
+  const [messages, setMessages] = useState([]);
 
-  const handleUpload = async () => {
-    const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  useEffect(() => {
+    // Initialize chat with a welcome message
+    setMessages([
+      {
+        _id: 1,
+        text: 'Hello! You can type a math problem or click "Scan" to take a picture.',
+        createdAt: new Date(),
+        user: {
+          _id: 2,
+          name: 'Assistant',
+        },
+      },
+    ]);
+  }, []);
 
-    if (permissionResult.granted === false) {
-      Alert.alert('Permission Required', 'Permission to access media library is required!');
-      return;
+  const onSend = useCallback((newMessages = []) => {
+    setMessages(previousMessages => GiftedChat.append(previousMessages, newMessages));
+    const message = newMessages[0];
+    console.log('Received message:', message);
+    if (message.text) {
+      handleSolve(message.text, message._id);
+    } else if (message.image || (message.image && message.image.uri)) {
+      const imageUri = message.image.uri || message.image;
+      console.log('Processing image:', imageUri);
+      handleImageSolve(imageUri, message._id);
+    } else {
+      console.log('No text or image found in the message');
     }
+  }, []);
 
-    const pickerResult = await ImagePicker.launchImageLibraryAsync({
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 1,
-      base64: true,
-    });
-
-    if (!pickerResult.canceled) {
-      setImage(pickerResult.assets[0]);
-      console.log('Image set:', pickerResult.assets[0].uri);
-    }
-  };
-
-  const handleSolve = async () => {
+  const handleSolve = async (inputText, messageId) => {
     try {
-      let body;
-      let headers = {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      };
-
-      if (image) {
-        // Use FileReader API for web compatibility
-        const response = await fetch(image.uri);
-        const blob = await response.blob();
-        const base64 = await new Promise((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.readAsDataURL(blob);
-        });
-
-        body = JSON.stringify({
-          image: base64.split(',')[1], // Remove the data URL prefix
-          fileName: image.uri.split('/').pop(),
-          fileType: image.type || 'image/jpeg',
-        });
-        console.log('Image file name:', image.uri.split('/').pop());
-        console.log('Image file type:', image.type || 'image/jpeg');
-      } else if (inputText) {
-        body = JSON.stringify({ input: inputText });
-      } else {
-        Alert.alert('Input Required', 'Please enter a math problem or upload an image.');
-        return;
-      }
-
-      console.log('Request Headers:', headers);
-
-      const response = await fetch('http://localhost:3000/api/solve-math', {
+      // Send text input to backend
+      const response = await fetch('http://172.20.10.2:3000/api/solve-math', {
         method: 'POST',
-        headers: headers,
-        body: body,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ input: inputText }),
       });
-
-      const responseText = await response.text();
-      console.log('Response Text:', responseText);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}, message: ${responseText}`);
+      console.log(response);
+      const data = await response.json();
+      console.log(data);
+      if (response.ok) {
+        const solution = data.solution;
+        displayAnswer(solution, messageId);
+      } else {
+        Alert.alert('Error', data.error || 'An error occurred.');
       }
-
-      const data = JSON.parse(responseText);
-      const cleanedSolution = data.solution.replace(/###/g, '').replace(/\*\*/g, ''); // Remove "###" and "**" from the solution
-      setResult(cleanedSolution);
     } catch (error) {
       console.error('Error:', error);
       Alert.alert('Error', 'An error occurred while solving the problem.');
     }
   };
 
-  const formatSolution = (solution) => {
-    // Split the solution into steps
-    const steps = solution.split('\n\n').filter(step => step.trim() !== '');
-    
-    // Format each step
-    const formattedSteps = steps.map((step, index) => {
-      // Check if the step already starts with "Step X:"
-      if (step.startsWith('Step')) {
-        return step;
+  const handleImageSolve = async (imageUri, messageId) => {
+    try {
+      // First, update the message to show the image
+      setMessages(previousMessages => 
+        previousMessages.map(msg => 
+          msg._id === messageId ? { ...msg, image: imageUri } : msg
+        )
+      );
+
+      let base64Image;
+
+      if (Platform.OS === 'web') {
+        // For web, fetch the image and convert it to base64
+        const response = await fetch(imageUri);
+        const blob = await response.blob();
+        base64Image = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result.split(',')[1]);
+          reader.readAsDataURL(blob);
+        });
+      } else {
+        // For native platforms, use expo-file-system
+        base64Image = await FileSystem.readAsStringAsync(imageUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
       }
-      // If not, add the step number
-      return `Step ${index + 1}: ${step.trim()}`;
-    });
+
+      // Send image to backend
+      const response = await fetch('http://172.20.10.2:3000/api/solve-math', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          image: base64Image,
+          filename: 'math_problem.jpg',
+        }),
+      });
+
+      const data = await response.json();
+      if (response.ok) {
+        const solution = data.solution;
+        displayAnswer(solution, messageId);
+      } else {
+        Alert.alert('Error', data.error || 'An error occurred.');
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      Alert.alert('Error', 'An error occurred while solving the problem.');
+    }
+  };
+
+  const displayAnswer = (solution, messageId) => {
+    const cleanedSolution = solution.replace(/###/g, '').replace(/\*\*/g, '');
+    const newMessage = {
+      _id: messageId + 1,
+      text: cleanedSolution,
+      createdAt: new Date(),
+      user: {
+        _id: 2,
+        name: 'Assistant',
+      },
+    };
+    setMessages(previousMessages => GiftedChat.append(previousMessages, newMessage));
+  };
+
+  const formatLatex = (text) => {
+    // Replace newline characters with <br> tags
+    text = text.replace(/\n/g, '<br>');
     
-    // Join the formatted steps
-    return formattedSteps.join('\n\n');
+    // Wrap the entire text in <latex> tags
+    return `<latex>${text}</latex>`;
+  };
+
+  const renderActions = (props) => (
+    <Actions
+      {...props}
+      options={{
+        'Scan': openCamera,
+        'Cancel': () => {},
+      }}
+      icon={() => (
+        <Text style={{ fontSize: 24, marginBottom: 5 }}>📷</Text>
+      )}
+      onSend={args => console.log(args)}
+    />
+  );
+
+  const renderInputToolbar = (props) => (
+    <InputToolbar
+      {...props}
+      containerStyle={styles.inputToolbar}
+    />
+  );
+
+  const openCamera = async () => {
+    const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+    if (permissionResult.granted === false) {
+      Alert.alert('Permission Required', 'Permission to access camera is required!');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 1,
+    });
+
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const imageUri = result.assets[0].uri;
+      console.log('Image captured:', imageUri);
+      const message = {
+        _id: new Date().getTime(),
+        createdAt: new Date(),
+        user: { _id: 1 },
+        image: imageUri,
+      };
+      console.log('Sending message with image:', message);
+      onSend([message]);
+    }
+  };
+
+  const renderMessageText = (props) => {
+    return (
+      <View style={{ 
+        padding: 10,
+        backgroundColor: props.position === 'left' ? '#E5E5EA' : '#007AFF',
+        borderRadius: 10,
+        marginBottom: 5,
+      }}>
+        <Latex>{props.currentMessage.text}</Latex>
+      </View>
+    );
+  };
+
+  const renderBubble = (props) => {
+    return (
+      <Bubble
+        {...props}
+        wrapperStyle={{
+          right: {
+            backgroundColor: '#007AFF',
+          },
+          left: {
+            backgroundColor: '#E5E5EA',
+          },
+        }}
+        textStyle={{
+          right: {
+            color: '#FFFFFF',
+          },
+          left: {
+            color: '#000000',
+          },
+        }}
+      />
+    );
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Math Problem Solver</Text>
-
-      <TextInput
-        style={styles.input}
-        placeholder="Enter a math problem"
-        onChangeText={setInputText}
-        value={inputText}
-      />
-
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity style={styles.button} onPress={handleUpload}>
-          <Text style={styles.buttonText}>Upload</Text>
-        </TouchableOpacity>
-      </View>
-
-      {image && (
-        <View style={styles.imageContainer}>
-          <Image source={{ uri: image.uri }} style={styles.image} />
-          <Text>Image URI: {image.uri}</Text>
-        </View>
-      )}
-
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity style={styles.button} onPress={handleSolve}>
-          <Text style={styles.buttonText}>Solve</Text>
-        </TouchableOpacity>
-      </View>
-
-      {result !== '' && (
-        <View style={styles.resultContainer}>
-          <Text style={styles.resultTitle}>Result:</Text>
-          <Latex>{result}</Latex>
-        </View>
-      )}
-    </ScrollView>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container}>
+        <KeyboardAvoidingView 
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          style={styles.container}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
+        >
+          <GiftedChat
+            messages={messages}
+            onSend={messages => onSend(messages)}
+            user={{ _id: 1 }}
+            renderActions={renderActions}
+            renderInputToolbar={renderInputToolbar}
+            renderMessageText={renderMessageText}
+            renderBubble={renderBubble}
+            alwaysShowSend
+            scrollToBottom
+          />
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -174,60 +289,16 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
     backgroundColor: '#F5FCFF',
-    justifyContent: 'flex-start', // Changed from 'center' to 'flex-start'
-    paddingTop: 50, // Added to give some space at the top
   },
-  title: {
-    fontSize: 28,
-    textAlign: 'center',
-    marginBottom: 30,
-    fontWeight: '600',
-  },
-  input: {
-    height: 50,
-    borderColor: '#CCC',
+  inputToolbar: {
+    marginLeft: 10,
+    marginRight: 10,
+    marginBottom: 10,
+    borderRadius: 20,
     borderWidth: 1,
-    paddingHorizontal: 15,
-    marginBottom: 20,
-    borderRadius: 8,
+    borderColor: '#E0E0E0',
+    backgroundColor: '#FFFFFF',
   },
-  image: {
-    width: 200,
-    height: 200,
-    resizeMode: 'contain',
-    marginBottom: 10,
-  },
-  buttonContainer: {
-    marginBottom: 20,
-  },
-  button: {
-    backgroundColor: '#1976D2',
-    padding: 15,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
-  resultContainer: {
-    marginTop: 20,
-    padding: 15,
-    backgroundColor: '#E3F2FD',
-    borderRadius: 8,
-  },
-  resultTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    marginBottom: 10,
-  },
-  resultText: {
-    fontSize: 18,
-  },
-  imageContainer: {
-    marginBottom: 20,
-    alignItems: 'center',
-  },
+  // ... (keep other existing styles)
 });
