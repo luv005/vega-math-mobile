@@ -6,23 +6,18 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  TextInput,
+  Image, // Add this import
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { GiftedChat, Actions, InputToolbar, Bubble } from 'react-native-gifted-chat';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import 'katex/dist/katex.min.css';
+import { NavigationContainer } from '@react-navigation/native';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { Ionicons } from '@expo/vector-icons';
 import Latex from 'react-latex-next';
-
-// Import KaTeX for web
-let katex;
-if (Platform.OS === 'web') {
-  katex = require('katex');
-}
-
-// Only import MathJax for native platforms
-const MathJax = Platform.OS !== 'web' ? require('react-native-mathjax').default : null;
-
+import { MathJaxSvg } from 'react-native-mathjax-html-to-svg';
 // Add this function at the top of your file, outside of the App component
 function logFormData(formData) {
   let result = {};
@@ -40,39 +35,72 @@ function logFormData(formData) {
   return JSON.stringify(result, null, 2);
 }
 
-export default function App() {
-  const [inputText, setInputText] = useState('');
-  const [image, setImage] = useState(null);
-  const [result, setResult] = useState('');
+const Tab = createBottomTabNavigator();
+
+function ScanScreen({ navigation }) {
+  const openCamera = useCallback(async () => {
+    const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
+    if (permissionResult.granted === false) {
+      Alert.alert('Permission Required', 'Permission to access camera is required!');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 1,
+    });
+
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const imageUri = result.assets[0].uri;
+      console.log('Image captured:', imageUri);
+      navigation.navigate('Chat', { imageUri });
+    }
+  }, [navigation]);
+
+  useEffect(() => {
+    openCamera();
+  }, [openCamera]);
+
+  return (
+    <View style={styles.container}>
+      <Text>Opening camera...</Text>
+    </View>
+  );
+}
+
+function ChatScreen({ route }) {
   const [messages, setMessages] = useState([]);
 
   useEffect(() => {
-    // Initialize chat with a welcome message
     setMessages([
       {
         _id: 1,
-        text: 'Hello! You can type a math problem or click "Scan" to take a picture.',
+        text: 'Hello! You can type a math problem or use the Scan tab to take a picture.',
         createdAt: new Date(),
-        user: {
-          _id: 2,
-          name: 'Assistant',
-        },
+        user: { _id: 2, name: 'Assistant' },
       },
     ]);
   }, []);
 
+  useEffect(() => {
+    if (route.params?.imageUri) {
+      const newImageMessage = {
+        _id: new Date().getTime(),
+        createdAt: new Date(),
+        user: { _id: 1 },
+        image: route.params.imageUri,
+      };
+      setMessages(previousMessages => GiftedChat.append(previousMessages, [newImageMessage]));
+      handleImageSolve(route.params.imageUri, newImageMessage._id);
+    }
+  }, [route.params?.imageUri]);
+
   const onSend = useCallback((newMessages = []) => {
     setMessages(previousMessages => GiftedChat.append(previousMessages, newMessages));
     const message = newMessages[0];
-    console.log('Received message:', message);
     if (message.text) {
       handleSolve(message.text, message._id);
-    } else if (message.image || (message.image && message.image.uri)) {
-      const imageUri = message.image.uri || message.image;
-      console.log('Processing image:', imageUri);
-      handleImageSolve(imageUri, message._id);
-    } else {
-      console.log('No text or image found in the message');
     }
   }, []);
 
@@ -103,12 +131,7 @@ export default function App() {
 
   const handleImageSolve = async (imageUri, messageId) => {
     try {
-      // First, update the message to show the image
-      setMessages(previousMessages => 
-        previousMessages.map(msg => 
-          msg._id === messageId ? { ...msg, image: imageUri } : msg
-        )
-      );
+      // No need to update messages here, as we've already added the image message
 
       let base64Image;
 
@@ -154,10 +177,11 @@ export default function App() {
   };
 
   const displayAnswer = (solution, messageId) => {
-    const cleanedSolution = solution.replace(/###/g, '').replace(/\*\*/g, '');
+    const cleanedSolution = solution.replace(/###/g, '').replace(/\*\*/g, ''); // Remove "###" and "**" from the solution
+    const wrappedSolution = `<latex>${cleanedSolution}</latex>`;
     const newMessage = {
       _id: messageId + 1,
-      text: cleanedSolution,
+      text: wrappedSolution,
       createdAt: new Date(),
       user: {
         _id: 2,
@@ -167,71 +191,42 @@ export default function App() {
     setMessages(previousMessages => GiftedChat.append(previousMessages, newMessage));
   };
 
-  const formatLatex = (text) => {
-    // Replace newline characters with <br> tags
-    text = text.replace(/\n/g, '<br>');
-    
-    // Wrap the entire text in <latex> tags
-    return `<latex>${text}</latex>`;
-  };
-
-  const renderActions = (props) => (
-    <Actions
-      {...props}
-      options={{
-        'Scan': openCamera,
-        'Cancel': () => {},
-      }}
-      icon={() => (
-        <Text style={{ fontSize: 24, marginBottom: 5 }}>📷</Text>
-      )}
-      onSend={args => console.log(args)}
-    />
-  );
-
-  const renderInputToolbar = (props) => (
-    <InputToolbar
-      {...props}
-      containerStyle={styles.inputToolbar}
-    />
-  );
-
-  const openCamera = async () => {
-    const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
-    if (permissionResult.granted === false) {
-      Alert.alert('Permission Required', 'Permission to access camera is required!');
-      return;
-    }
-
-    const result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 1,
-    });
-
-    if (!result.canceled && result.assets && result.assets.length > 0) {
-      const imageUri = result.assets[0].uri;
-      console.log('Image captured:', imageUri);
-      const message = {
-        _id: new Date().getTime(),
-        createdAt: new Date(),
-        user: { _id: 1 },
-        image: imageUri,
-      };
-      console.log('Sending message with image:', message);
-      onSend([message]);
-    }
-  };
-
   const renderMessageText = (props) => {
+    const textContent = props.currentMessage.text ? props.currentMessage.text.replace(/<\/?latex>/g, '') : '';
+    
+    if (Platform.OS === 'web') {
+      return (
+        <View style={styles.messageBubble(props.position)}>
+          <Latex>{textContent}</Latex>
+        </View>
+      );
+    } else {
+      return (
+        <View style={styles.messageBubble(props.position)}>
+          <Text style={styles.messageText(props.position)}>
+            <MathJaxSvg
+              fontSize={16}
+              color={props.position === 'left' ? '#000000' : '#FFFFFF'}
+            >
+              {textContent}
+            </MathJaxSvg>
+          </Text>
+        </View>
+      );
+    }
+  };
+
+  const renderMessage = (props) => {
+    if (props.currentMessage.image) {
+      return (
+        <View style={styles.messageContainer(props.position)}>
+          <Image source={{ uri: props.currentMessage.image }} style={styles.imageMessage} />
+        </View>
+      );
+    }
     return (
-      <View style={{ 
-        padding: 10,
-        backgroundColor: props.position === 'left' ? '#E5E5EA' : '#007AFF',
-        borderRadius: 10,
-        marginBottom: 5,
-      }}>
-        <Latex>{props.currentMessage.text}</Latex>
+      <View style={styles.messageContainer(props.position)}>
+        {renderMessageText(props)}
       </View>
     );
   };
@@ -261,35 +256,99 @@ export default function App() {
   };
 
   return (
+    <SafeAreaView style={styles.container}>
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={styles.container}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
+      >
+        <GiftedChat
+          messages={messages}
+          onSend={messages => onSend(messages)}
+          user={{ _id: 1 }}
+          renderMessage={renderMessage}
+          renderBubble={renderBubble}
+          alwaysShowSend
+          scrollToBottom
+          textInputProps={{
+            style: styles.textInput,
+          }}
+        />
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+function ProfileScreen() {
+  return (
+    <View style={styles.container}>
+      <Text>Profile Screen</Text>
+    </View>
+  );
+}
+
+export default function App() {
+  return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.container}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-          style={styles.container}
-          keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
+      <NavigationContainer>
+        <Tab.Navigator
+          screenOptions={({ route }) => ({
+            tabBarIcon: ({ focused, color, size }) => {
+              let iconName;
+
+              if (route.name === 'Scan') {
+                iconName = focused ? 'scan' : 'scan-outline';
+              } else if (route.name === 'Chat') {
+                iconName = focused ? 'chatbubble' : 'chatbubble-outline';
+              } else if (route.name === 'Profile') {
+                iconName = focused ? 'person' : 'person-outline';
+              }
+
+              return <Ionicons name={iconName} size={size} color={color} />;
+            },
+            tabBarActiveTintColor: '#007AFF',
+            tabBarInactiveTintColor: 'gray',
+            tabBarStyle: {
+              display: 'flex',
+            },
+            tabBarLabelStyle: {
+              fontSize: 12,
+            },
+          })}
+          listeners={({ navigation }) => ({
+            tabPress: (e) => {
+              if (e.target.toString().includes('Scan')) {
+                e.preventDefault();
+                navigation.navigate('Scan');
+              }
+            },
+          })}
         >
-          <GiftedChat
-            messages={messages}
-            onSend={messages => onSend(messages)}
-            user={{ _id: 1 }}
-            renderActions={renderActions}
-            renderInputToolbar={renderInputToolbar}
-            renderMessageText={renderMessageText}
-            renderBubble={renderBubble}
-            alwaysShowSend
-            scrollToBottom
-          />
-        </KeyboardAvoidingView>
-      </SafeAreaView>
+          <Tab.Screen name="Scan" component={ScanScreen} options={{ unmountOnBlur: true }} />
+          <Tab.Screen name="Chat" component={ChatScreen} />
+          <Tab.Screen name="Profile" component={ProfileScreen} />
+        </Tab.Navigator>
+      </NavigationContainer>
     </SafeAreaProvider>
   );
 }
 
-// Styles
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F5FCFF',
+  },
+  scanButton: {
+    backgroundColor: '#007AFF',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    margin: 20,
+  },
+  scanButtonText: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: 'bold',
   },
   inputToolbar: {
     marginLeft: 10,
@@ -300,5 +359,41 @@ const styles = StyleSheet.create({
     borderColor: '#E0E0E0',
     backgroundColor: '#FFFFFF',
   },
-  // ... (keep other existing styles)
+  messageBubble: (position) => ({
+    padding: 10,
+    backgroundColor: position === 'left' ? '#E5E5EA' : '#007AFF',
+    borderRadius: 10,
+    marginBottom: 5,
+    maxWidth: '80%',
+    flexShrink: 1,
+  }),
+  messageContainer: (position) => ({
+    flexDirection: 'row',
+    justifyContent: position === 'left' ? 'flex-start' : 'flex-end',
+    marginVertical: 5,
+    marginHorizontal: 10,
+    maxWidth: '80%',
+  }),
+  textInput: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 16,
+    lineHeight: 16,
+    marginTop: 6,
+    marginBottom: 6,
+  },
+  messageText: (position) => ({
+    color: position === 'left' ? '#000000' : '#FFFFFF',
+    fontSize: 16,
+    flexWrap: 'wrap',
+    flex: 1,
+  }),
+  imageMessage: {
+    width: 200,
+    height: 200,
+    borderRadius: 13,
+    margin: 3,
+    resizeMode: 'cover',
+  },
+  // Remove inlineLatex and displayLatex styles if they're not used elsewhere
 });
